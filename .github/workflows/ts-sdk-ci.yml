@@ -1,0 +1,167 @@
+name: TypeScript SDK CI
+
+# On PRs this is invoked by ci-gate.yml (the single required check);
+# push-to-main runs remain standalone.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mem0-ts/**'
+      - '.github/workflows/ts-sdk-ci.yml'
+  workflow_call:
+
+jobs:
+  check_changes:
+    runs-on: ubuntu-latest
+    outputs:
+      ts_sdk_changed: ${{ steps.filter.outputs.ts_sdk }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: filter
+        with:
+          filters: |
+            ts_sdk:
+              - 'mem0-ts/**'
+
+  changelog_check:
+    needs: check_changes
+    if: github.event_name == 'pull_request' && needs.check_changes.outputs.ts_sdk_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Require changelog entry when SDK version changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          base_version=""
+          if raw_base=$(git show "$BASE_SHA:mem0-ts/package.json" 2>/dev/null) \
+            && base_version=$(printf '%s' "$raw_base" | jq -r '.version // empty' 2>/dev/null); then
+            :
+          else
+            base_version=""
+            echo "::warning::Could not read mem0-ts/package.json at the pull request base commit; skipping the changelog requirement."
+          fi
+
+          if ! head_version=$(jq -r '.version // empty' mem0-ts/package.json); then
+            echo "::error file=mem0-ts/package.json::Could not read the current TypeScript SDK version."
+            exit 1
+          fi
+          if [ -z "$head_version" ]; then
+            echo "::error file=mem0-ts/package.json::Could not read the current TypeScript SDK version."
+            exit 1
+          fi
+
+          echo "Base version: ${base_version:-<unknown>}"
+          echo "Head version: ${head_version}"
+
+          if [ -z "$base_version" ] || [ "$base_version" = "$head_version" ]; then
+            echo "mem0-ts/package.json version unchanged — no changelog entry required."
+            exit 0
+          fi
+
+          echo "Detected version change ${base_version} -> ${head_version}. Checking docs/changelog/sdk.mdx..."
+
+          changelog_diff=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- docs/changelog/sdk.mdx)
+          if [ -n "$changelog_diff" ]; then
+            echo "Changelog update present in docs/changelog/sdk.mdx."
+          else
+            echo "::error file=mem0-ts/package.json::mem0-ts/package.json version changed from ${base_version} to ${head_version} but docs/changelog/sdk.mdx was not updated in this PR. Add a new <Update> entry under the TypeScript tab in docs/changelog/sdk.mdx for v${head_version}."
+            exit 1
+          fi
+
+  build_ts_sdk:
+    needs: check_changes
+    if: needs.check_changes.outputs.ts_sdk_changed == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        node-version: [20, 22]
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
+          cache-dependency-path: mem0-ts/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: mem0-ts
+        run: pnpm install --frozen-lockfile
+
+      - name: Check formatting
+        working-directory: mem0-ts
+        run: npx prettier --check .
+
+      - name: Build
+        working-directory: mem0-ts
+        run: pnpm run build
+
+      - name: Run unit tests
+        working-directory: mem0-ts
+        run: pnpm run test:unit
+
+      - name: Verify package exports
+        working-directory: mem0-ts
+        run: |
+          node -e "const m = require('./dist/index.js'); console.log('Client exports:', Object.keys(m).length)"
+          node -e "const m = require('./dist/oss/index.js'); console.log('OSS exports:', Object.keys(m).length)"
+
+      - name: Upload coverage
+        if: matrix.node-version == 20
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-report
+          path: mem0-ts/coverage/
+          if-no-files-found: warn
+
+  integration_ts_sdk:
+    needs: build_ts_sdk
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        node-version: [20, 22]
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
+          cache-dependency-path: mem0-ts/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: mem0-ts
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        working-directory: mem0-ts
+        run: pnpm run build
+
+      - name: Run integration tests
+        working-directory: mem0-ts
+        env:
+          MEM0_API_KEY: ${{ secrets.MEM0_API_KEY }}
+        run: pnpm run test:integration

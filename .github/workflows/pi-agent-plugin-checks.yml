@@ -1,0 +1,119 @@
+name: pi-agent-plugin checks
+
+# On PRs this is invoked by ci-gate.yml (the single required check);
+# push-to-main and manual runs remain standalone.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'integrations/pi-agent-plugin/**'
+      - '.github/workflows/pi-agent-plugin-checks.yml'
+  workflow_call:
+
+jobs:
+  lint:
+    name: Type check (Node 20)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/pi-agent-plugin
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: '10'
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: integrations/pi-agent-plugin/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check with tsc
+        run: pnpm exec tsc --noEmit
+
+  test:
+    name: Test (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        node-version: [20, 22]
+    defaults:
+      run:
+        working-directory: integrations/pi-agent-plugin
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: '10'
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+          cache-dependency-path: integrations/pi-agent-plugin/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Vitest test suite
+        run: pnpm exec vitest run
+
+  build:
+    name: Build (Node 20)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/pi-agent-plugin
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: '10'
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: integrations/pi-agent-plugin/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build package
+        run: pnpm run build
+
+      - name: Verify required dist entry files
+        run: |
+          missing=0
+          for file in dist/index.js dist/index.d.ts dist/entry.js dist/entry.d.ts; do
+            if [ -f "$file" ]; then
+              echo "Found required build output: $file"
+            else
+              echo "::error file=integrations/pi-agent-plugin/$file::Required build output is missing: $file"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Required build outputs are missing. Contents of dist:"
+            ls -la dist || true
+            exit 1
+          fi
+          echo "All four required dist entry files are present."
